@@ -88,7 +88,7 @@ Yolov PCB/
 
 | 項目 | 需求 |
 |------|------|
-| Python | >= 3.9 |
+| Python | >= 3.10（建議 3.10 / 3.11，避免 3.12+ 相容性問題） |
 | GPU（建議） | NVIDIA GPU，VRAM >= 4GB，CUDA 11.8 / 12.x |
 | RAM | >= 8GB（訓練建議 16GB+） |
 | 作業系統 | Windows 10/11、Ubuntu 20.04+、macOS 12+ |
@@ -166,9 +166,14 @@ dataset = project.version(1).download("yolov8")
 
 1. 安裝標注工具：
    ```bash
-   uv tool install labelImg
+   # Python 3.12+ 需要加入 setuptools（避免 distutils 模組缺失錯誤）
+   uv tool install labelImg --with setuptools --reinstall
+
+   # 若已正常安裝則直接執行
    labelImg
    ```
+   > **⚠️ 注意（Python 3.12+）**：Python 3.12 移除了 `distutils` 模組，直接 `uv tool install labelImg` 會出現 `ModuleNotFoundError: No module named 'distutils'`。請務必加上 `--with setuptools` 旗標。若仍有問題，建議改用 Python 3.11 執行。
+
 2. 在 LabelImg 中選擇 **YOLO 格式**，對 PCB 瑕疵框選邊界框並儲存。
 3. 將影像與標注分別放入 `data/train/images/` 和 `data/train/labels/`。
 
