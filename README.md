@@ -97,20 +97,36 @@ Yolov PCB/
 
 ## 🚀 快速開始
 
-### 步驟一：安裝依賴套件
+### 步驟一：安裝 uv 與依賴套件
 
 ```bash
-# （建議）建立虛擬環境
-python -m venv venv
-source venv/bin/activate          # Linux / macOS
-venv\Scripts\activate             # Windows
+# 安裝 uv（若尚未安裝）
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
-# 安裝所有依賴
-pip install -r requirements.txt
+# Linux / macOS
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 若有 NVIDIA GPU，安裝對應 CUDA 版本的 PyTorch（依官網指示）
-# https://pytorch.org/get-started/locally/
+# 使用 uv 同步專案（自動建立虛擬環境 + 安裝所有依賴）
+uv sync
+
+# 若有 NVIDIA GPU，可指定 PyTorch CUDA 版本:
+uv sync --extra-index-url https://download.pytorch.org/whl/cu121
+
+# 安裝開發工具（ruff, pytest 等）
+uv sync --dev
+
+# 也可用 uv run 直接執行腳本（自動啟用虛擬環境）
+uv run python src/train.py --model n --epochs 100
 ```
+
+> **傳統 pip 方式（替代方案）：**
+> ```bash
+> python -m venv venv
+> source venv/bin/activate   # Linux / macOS
+> venv\Scripts\activate      # Windows
+> pip install -r requirements.txt
+> ```
 
 ### 步驟二：準備資料集
 
@@ -121,13 +137,13 @@ pip install -r requirements.txt
 
 ```bash
 # 轉換 VOC XML 標注 → YOLO txt 格式
-python src/preprocess.py --mode convert \
+uv run python src/prepare_dataset.py --mode convert \
   --image-dir /path/to/DeepPCB/images \
   --annot-dir /path/to/DeepPCB/annotations \
   --output-dir ./data/raw
 
-# 按 7:2:1 自動分割 train / val / test
-python src/preprocess.py --mode split \
+# 按 8:1:1 自動分割 train / val / test
+uv run python src/prepare_dataset.py --mode split \
   --image-dir ./data/raw/images \
   --label-dir ./data/raw/labels \
   --output-dir ./data
@@ -136,7 +152,7 @@ python src/preprocess.py --mode split \
 #### 方法 B：Roboflow 線上資料集
 
 ```bash
-pip install roboflow
+uv add roboflow
 ```
 
 ```python
@@ -150,7 +166,7 @@ dataset = project.version(1).download("yolov8")
 
 1. 安裝標注工具：
    ```bash
-   pip install labelImg
+   uv tool install labelImg
    labelImg
    ```
 2. 在 LabelImg 中選擇 **YOLO 格式**，對 PCB 瑕疵框選邊界框並儲存。
@@ -180,19 +196,19 @@ names:
 
 ```bash
 # 使用 YOLOv8n（最快，適合即時應用）
-python src/train.py --model n --epochs 100
+uv run python src/train.py --model n --epochs 100
 
 # 使用 YOLOv8s（平衡速度與精度）
-python src/train.py --model s --epochs 150 --batch 8
+uv run python src/train.py --model s --epochs 150 --batch 8
 
 # 使用 YOLOv8m（較高精度）
-python src/train.py --model m --epochs 200 --batch 4
+uv run python src/train.py --model m --epochs 200 --batch 4
 
 # 指定 GPU 與 batch size
-python src/train.py --model n --epochs 100 --device 0 --batch 16
+uv run python src/train.py --model n --epochs 100 --device 0 --batch 16
 
 # 從中斷點繼續訓練
-python src/train.py --resume --resume-path ./results/pcb_defect_v1/weights/last.pt
+uv run python src/train.py --resume --resume-path ./results/pcb_defect_v1/weights/last.pt
 ```
 
 訓練完成後，最佳模型自動儲存於：
@@ -204,16 +220,16 @@ results/<實驗名稱>/weights/best.pt
 
 ```bash
 # 基本啟動
-python src/app.py
+uv run python src/app.py
 
 # 預先指定模型路徑
-python src/app.py --model ./results/pcb_defect_v1/weights/best.pt
+uv run python src/app.py --model ./results/pcb_defect_v1/weights/best.pt
 
 # 建立 Gradio 公開分享連結（適合遠端展示）
-python src/app.py --share
+uv run python src/app.py --share
 
 # 自訂伺服器 IP 與 Port
-python src/app.py --host 0.0.0.0 --port 8080
+uv run python src/app.py --host 0.0.0.0 --port 8080
 ```
 
 開啟瀏覽器訪問：**`http://localhost:7860`**
@@ -222,14 +238,14 @@ python src/app.py --host 0.0.0.0 --port 8080
 
 ```bash
 # 單張影像偵測
-python src/inference.py \
+uv run python src/inference.py \
   --model ./results/pcb_defect_v1/weights/best.pt \
   --source ./data/test/images/sample.jpg \
   --output ./results/inference \
   --conf 0.25
 
 # 批次資料夾偵測
-python src/inference.py \
+uv run python src/inference.py \
   --model ./results/pcb_defect_v1/weights/best.pt \
   --source ./data/test/images/ \
   --output ./results/inference \
