@@ -1,0 +1,54 @@
+# YOLOv8 訓練超參數設定
+
+# ──────────────────────────────
+# 基本訓練設定
+# ──────────────────────────────
+model: yolov8n.pt        # 基礎模型: yolov8n / yolov8s / yolov8m / yolov8l / yolov8x
+epochs: 100              # 訓練回合數
+batch: 16                # 批次大小 (依 GPU 記憶體調整)
+imgsz: 640               # 輸入影像尺寸
+device: 0                # GPU 編號 (0=第一張GPU, cpu=使用CPU)
+workers: 4               # 資料載入執行緒數
+
+# ──────────────────────────────
+# 優化器設定
+# ──────────────────────────────
+optimizer: AdamW         # 優化器: SGD / Adam / AdamW
+lr0: 0.001               # 初始學習率
+lrf: 0.01                # 最終學習率比例 (lr0 * lrf)
+momentum: 0.937          # SGD 動量
+weight_decay: 0.0005     # 權重衰減
+
+# ──────────────────────────────
+# 資料增強設定
+# ──────────────────────────────
+hsv_h: 0.015             # 色調增強幅度
+hsv_s: 0.7               # 飽和度增強幅度
+hsv_v: 0.4               # 亮度增強幅度
+degrees: 10.0            # 旋轉角度範圍
+translate: 0.1           # 位移比例
+scale: 0.5               # 縮放比例
+shear: 5.0               # 剪切角度
+perspective: 0.0         # 透視變換
+flipud: 0.3              # 垂直翻轉機率
+fliplr: 0.5              # 水平翻轉機率
+mosaic: 1.0              # Mosaic 增強機率
+mixup: 0.1               # MixUp 增強機率
+copy_paste: 0.1          # Copy-Paste 增強機率
+
+# ──────────────────────────────
+# 訓練技巧
+# ──────────────────────────────
+warmup_epochs: 3         # 學習率暖身回合
+warmup_bias_lr: 0.1      # 暖身期偏置學習率
+patience: 50             # Early Stopping 耐心值
+save_period: 10          # 每 N 回合儲存一次
+val: true                # 是否在訓練中驗證
+plots: true              # 是否繪製訓練曲線
+
+# ──────────────────────────────
+# 輸出設定
+# ──────────────────────────────
+project: ./results       # 結果儲存目錄
+name: pcb_defect_v1      # 訓練任務名稱
+exist_ok: false          # 是否覆蓋已存在的實驗

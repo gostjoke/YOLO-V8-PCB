@@ -1,0 +1,31 @@
+# PCB 瑕疵偵測資料集設定檔 (YOLO 格式)
+# 請根據您的實際資料夾路徑修改 path 欄位
+
+# 資料集根目錄 (相對路徑或絕對路徑)
+path: ./data
+
+# 各子集路徑 (相對於 path)
+train: train/images
+val: val/images
+test: test/images  # 可選
+
+# 類別數量
+nc: 6
+
+# 類別名稱 (PCB 常見瑕疵類型)
+names:
+  0: missing_hole       # 缺孔
+  1: mouse_bite         # 鼠咬 (缺口)
+  2: open_circuit       # 開路
+  3: short             # 短路
+  4: spur              # 毛刺
+  5: spurious_copper    # 多餘銅箔
+
+# 備用：若使用錫膏偵測 (Solder Paste Inspection)
+# names:
+#   0: insufficient_solder  # 錫量不足
+#   1: excess_solder        # 錫量過多
+#   2: solder_bridge        # 錫橋 (短路)
+#   3: missing_solder       # 缺錫
+#   4: cold_solder          # 冷焊
+#   5: offset_solder        # 偏移
