@@ -47,9 +47,11 @@ Yolov PCB/
 │       │   └── last.pt       # 最後一個 epoch 的模型
 │       └── ...               # 訓練曲線、混淆矩陣等圖表
 ├── src/
-│   ├── app.py                # Gradio GUI 主程式入口
-│   ├── inference.py          # 推論模組（PCBDefectDetector 類別）
+│   ├── app.py                # Gradio GUI 主程式入口（8 個功能頁籤）
+│   ├── inference.py          # 推論模組（影像/影片/串流、ONNX 匯出、CSV 報告）
+│   ├── analyzer.py           # 傳統 CV 分析器（黃金樣本比對 / 錫膏 / Blob）
 │   ├── preprocess.py         # OpenCV 影像前處理工具
+│   ├── prepare_dataset.py    # 資料集下載、VOC→YOLO 轉換、train/val/test 分割
 │   └── train.py              # YOLOv8 模型訓練腳本
 └── requirements.txt          # Python 套件依賴清單
 ```
@@ -249,20 +251,56 @@ uv run python src/inference.py \
   --output ./results/inference \
   --conf 0.25
 
-# 批次資料夾偵測
+# 批次資料夾偵測 (含 CSV 報告)
 uv run python src/inference.py \
   --model ./results/pcb_defect_v1/weights/best.pt \
   --source ./data/test/images/ \
   --output ./results/inference \
   --conf 0.3 \
-  --save-json
+  --save-csv
+
+# 影片 / Webcam 即時偵測
+uv run python src/inference.py \
+  --model ./results/pcb_defect_v1/weights/best.pt \
+  --video ./samples/line.mp4 \
+  --output ./results/video_inference \
+  --frame-skip 2
+
+# 開啟 Webcam (相機編號 0)
+uv run python src/inference.py --model best.pt --video 0
+
+# 匯出 ONNX / TensorRT 模型
+uv run python src/inference.py --model best.pt --export onnx --imgsz 640
+uv run python src/inference.py --model best.pt --export engine --imgsz 640
+```
+
+### 步驟七：傳統 CV 分析（選用，無需模型）
+
+若尚未完成訓練，可直接使用傳統電腦視覺方法：
+
+```bash
+# 黃金樣本比對 (需一張良品參考影像)
+uv run python src/analyzer.py --mode diff \
+  --reference ./samples/golden.jpg \
+  --image ./samples/test.jpg \
+  --output ./results/diff.jpg
+
+# 錫膏印刷 (SPI) 分析
+uv run python src/analyzer.py --mode solder \
+  --image ./samples/solder.jpg \
+  --output ./results/solder.jpg
+
+# 形態學 Blob 瑕疵偵測
+uv run python src/analyzer.py --mode blob \
+  --image ./samples/pcb.jpg \
+  --output ./results/blob.jpg
 ```
 
 ---
 
 ## 🖥️ GUI 介面功能說明
 
-系統提供 4 個功能頁籤：
+系統提供 **8 個功能頁籤**：
 
 ### ⚙️ 模型設定
 - 輸入 `.pt` 模型權重路徑並載入
@@ -279,7 +317,32 @@ uv run python src/inference.py \
 - 輸入資料夾路徑，一次偵測所有影像
 - 統計輸出：總數、良品數、不良品數、**良品率（%）**
 - 列出瑕疵數量最多的前三張影像
-- 結果自動儲存為標注影像與 JSON 報告
+- 結果自動儲存為標注影像、JSON 報告、**CSV 報告**（可直接匯入 Excel/Pandas）
+
+### 🎥 影片偵測（新）
+- 上傳產線/檢測影片，逐幀執行 YOLOv8 偵測
+- 支援 **Frame Skip** 參數以提升處理速度
+- 輸出標註後 MP4 與累計統計（總幀數、累計瑕疵、平均 FPS、各類別計數）
+- `src/inference.py --video 0` 亦可直接開啟 Webcam 即時偵測
+
+### 🎨 前處理預覽（新）
+- 互動式測試 `preprocess.py` 中的 OpenCV 方法組合
+- 可選去噪（Gaussian / Bilateral / NLM）、對比增強（CLAHE / Histogram / Gamma）、銳化
+- 輸出三合一比較圖（Original / Processed / Canny Edges）
+
+### 🧪 傳統 CV 分析（新）
+不依賴標注資料的輔助檢測工具，可與 YOLOv8 互補：
+
+| 子頁籤 | 原理 | 應用情境 |
+|--------|------|---------|
+| Ⓐ 黃金樣本比對 | ORB 特徵點對齊 + 絕對差值 + 形態學 | 無標注資料時快速挑瑕疵；驗證 YOLO 漏檢 |
+| Ⓑ 錫膏分析 (SPI) | HSV 閾值分割 + 連通區域 + 亮度體積估算 | 錫膏覆蓋率、焊墊體積初篩 |
+| Ⓒ Blob 偵測 | 自適應門檻 + 形態學 + 輪廓分析 | 毛刺、異物、細小破洞偵測 |
+
+### 📦 模型匯出（新）
+一鍵匯出訓練好的模型為部署格式：
+- **ONNX**（跨平台）、**TorchScript**、**OpenVINO**（Intel）、**TensorRT engine**（NVIDIA 極速）、**CoreML**（Apple）
+- 可指定輸入影像尺寸 320~1280
 
 ### 📖 使用說明
 - 系統內建的完整操作指引、資料集說明、模型選擇建議
@@ -416,3 +479,15 @@ PCB 影像輸入
 ---
 
 *本系統由 Python + OpenCV + PyTorch + YOLOv8 + Gradio 技術組合打造*
+
+---
+
+## 🆕 版本更新紀錄
+
+### v1.1（最新）
+- ➕ 新增 `src/analyzer.py` — 傳統 CV 分析器（黃金樣本比對 / 錫膏 SPI / Blob 偵測）
+- ➕ `inference.py` 新增影片 / Webcam 即時推論 (`predict_video`)
+- ➕ `inference.py` 新增 CSV 報告匯出 (`export_csv_report`)
+- ➕ `inference.py` 新增模型匯出 (`export_model` → ONNX / TorchScript / OpenVINO / TensorRT / CoreML)
+- ➕ GUI 介面新增 4 個頁籤：影片偵測、前處理預覽、傳統 CV 分析、模型匯出
+- ➕ 批次偵測同步輸出 CSV 報告便於後續統計分析

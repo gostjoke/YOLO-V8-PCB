@@ -4,22 +4,33 @@ PCB 瑕疵偵測系統 - Gradio GUI 介面
 """
 
 import cv2
+import csv
 import numpy as np
 import gradio as gr
 import json
 import os
+import tempfile
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from PIL import Image
 import torch
 
-# 嘗試載入推論模組
+# 嘗試載入推論 / 分析模組
 try:
     from inference import PCBDefectDetector
+    from preprocess import PCBPreprocessor, visualize_preprocessing
+    from analyzer import (
+        ReferenceDiffAnalyzer, SolderPasteAnalyzer, BlobDefectAnalyzer,
+    )
 except ImportError:
     import sys
     sys.path.insert(0, str(Path(__file__).parent))
     from inference import PCBDefectDetector
+    from preprocess import PCBPreprocessor, visualize_preprocessing
+    from analyzer import (
+        ReferenceDiffAnalyzer, SolderPasteAnalyzer, BlobDefectAnalyzer,
+    )
 
 # ── 全域變數 ──────────────────────────────────────────
 detector: Optional[PCBDefectDetector] = None
@@ -125,6 +136,178 @@ def detect_single(
         return image, f"❌ 偵測失敗: {str(e)}"
 
 
+# ── 影片偵測 ─────────────────────────────────────────
+def detect_video(
+    video_path: Optional[str],
+    conf: float,
+    iou: float,
+    frame_skip: int,
+) -> Tuple[Optional[str], str]:
+    """對影片進行瑕疵偵測並回傳標註後影片路徑"""
+    if not video_path:
+        return None, "⚠️ 請上傳一段影片"
+    if detector is None:
+        return None, "⚠️ 請先在「模型設定」頁面載入模型"
+    detector.confidence = conf
+    detector.iou_threshold = iou
+
+    out_dir = Path("./results/video_inference")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = out_dir / f"detected_{ts}.mp4"
+
+    try:
+        stats = detector.predict_video(
+            source=video_path,
+            output_path=str(out_path),
+            show=False,
+            frame_skip=max(1, int(frame_skip)),
+        )
+        cls_lines = "\n".join(
+            f"  - {n}: {c}" for n, c in stats["class_totals"].items()
+        ) or "  (無偵測到瑕疵)"
+        msg = (
+            f"✅ 影片偵測完成\n\n"
+            f"📹 總幀數: {stats['total_frames']}\n"
+            f"⚠️ 瑕疵累計: {stats['total_defects']}\n"
+            f"🚀 平均 FPS: {stats['avg_fps']}\n"
+            f"📊 類別統計:\n{cls_lines}\n\n"
+            f"📁 輸出: {out_path}"
+        )
+        return str(out_path), msg
+    except Exception as e:
+        return None, f"❌ 影片偵測失敗: {str(e)}"
+
+
+# ── 前處理預覽 ────────────────────────────────────────
+def preview_preprocess(
+    image: Optional[Image.Image],
+    denoise_method: str,
+    contrast_method: str,
+    apply_sharpen: bool,
+) -> Tuple[Optional[Image.Image], Optional[Image.Image]]:
+    """套用選定的 OpenCV 前處理並回傳比較圖"""
+    if image is None:
+        return None, None
+    pre = PCBPreprocessor()
+    cv_img = pil_to_cv2(image)
+    processed = pre.denoise(cv_img, method=denoise_method)
+    processed = pre.enhance_contrast(processed, method=contrast_method)
+    if apply_sharpen:
+        processed = pre.sharpen(processed)
+
+    # 比較圖 (原始 | 前處理 | Canny)
+    edges = pre.detect_edges(processed)
+    edges_bgr = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+    h = 360
+    ratio = h / cv_img.shape[0]
+    w = int(cv_img.shape[1] * ratio)
+    imgs = [cv2.resize(x, (w, h)) for x in (cv_img, processed, edges_bgr)]
+    for img, label in zip(imgs, ["Original", "Processed", "Edges"]):
+        cv2.putText(img, label, (10, 28), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8, (0, 255, 0), 2)
+    comparison = np.hstack(imgs)
+    return cv2_to_pil(processed), cv2_to_pil(comparison)
+
+
+# ── 傳統 CV 分析器 ────────────────────────────────────
+def analyze_reference_diff(
+    reference: Optional[Image.Image],
+    target: Optional[Image.Image],
+    diff_threshold: int,
+    min_area: int,
+) -> Tuple[Optional[Image.Image], Optional[Image.Image], str]:
+    """黃金樣本對比"""
+    if reference is None or target is None:
+        return None, None, "⚠️ 請同時上傳良品與測試影像"
+    try:
+        analyzer = ReferenceDiffAnalyzer(
+            min_area=int(min_area),
+            diff_threshold=int(diff_threshold),
+        )
+        ref_cv = pil_to_cv2(reference)
+        tgt_cv = pil_to_cv2(target)
+        cands, heatmap, annotated = analyzer.analyze(ref_cv, tgt_cv)
+        lines = [
+            f"🔎 **對比分析完成** — 偵測到 **{len(cands)}** 個差異區域",
+            "",
+            "| # | BBox | 面積 | 差異分數 |",
+            "|---|------|------|---------|",
+        ]
+        for i, c in enumerate(cands[:30], 1):
+            lines.append(
+                f"| {i} | {c.bbox} | {c.area} | {c.score} |"
+            )
+        if len(cands) > 30:
+            lines.append(f"| ... | *尚有 {len(cands)-30} 筆未顯示* | | |")
+        return cv2_to_pil(annotated), cv2_to_pil(heatmap), "\n".join(lines)
+    except Exception as e:
+        return None, None, f"❌ 分析失敗: {str(e)}"
+
+
+def analyze_solder(
+    image: Optional[Image.Image],
+    v_min: int,
+    min_area: int,
+) -> Tuple[Optional[Image.Image], str]:
+    """錫膏分析"""
+    if image is None:
+        return None, "⚠️ 請上傳影像"
+    try:
+        analyzer = SolderPasteAnalyzer(
+            hsv_lower=(0, 0, int(v_min)),
+            hsv_upper=(180, 80, 255),
+            min_area=int(min_area),
+        )
+        cv_img = pil_to_cv2(image)
+        stats, annotated = analyzer.analyze(cv_img)
+        msg = (
+            f"### 🧪 錫膏印刷分析結果\n"
+            f"- 錫膏塊數量: **{stats['pad_count']}**\n"
+            f"- 總面積: {stats['total_area']} px²\n"
+            f"- 覆蓋率: **{stats['coverage']*100:.2f}%**\n"
+            f"- 平均亮度 (厚度 proxy): {stats['avg_brightness']}\n"
+        )
+        return cv2_to_pil(annotated), msg
+    except Exception as e:
+        return None, f"❌ 分析失敗: {str(e)}"
+
+
+def analyze_blob(
+    image: Optional[Image.Image],
+    min_area: int,
+    max_area: int,
+) -> Tuple[Optional[Image.Image], str]:
+    """形態學小斑點分析"""
+    if image is None:
+        return None, "⚠️ 請上傳影像"
+    try:
+        analyzer = BlobDefectAnalyzer(
+            min_area=int(min_area), max_area=int(max_area)
+        )
+        cv_img = pil_to_cv2(image)
+        cands, annotated = analyzer.analyze(cv_img)
+        return cv2_to_pil(annotated), (
+            f"🔹 偵測到 **{len(cands)}** 個異常區塊 "
+            f"(面積範圍 {min_area}~{max_area} px²)"
+        )
+    except Exception as e:
+        return None, f"❌ 分析失敗: {str(e)}"
+
+
+# ── 模型匯出 ─────────────────────────────────────────
+def export_model_ui(format: str, image_size: int) -> str:
+    if detector is None:
+        return "⚠️ 請先載入模型"
+    try:
+        path = detector.export_model(
+            format=format, image_size=int(image_size)
+        )
+        return f"✅ 匯出成功\n格式: {format}\n路徑: {path}"
+    except Exception as e:
+        return f"❌ 匯出失敗: {str(e)}"
+
+
 # ── 批次資料夾偵測 ────────────────────────────────────
 def detect_folder(
     input_dir: str,
@@ -153,6 +336,13 @@ def detect_folder(
             output_dir=output_dir,
             save_json=True,
         )
+        # 同步輸出 CSV 報告
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        csv_path = str(Path(output_dir) / f"report_{ts}.csv")
+        try:
+            detector.export_csv_report(results, csv_path)
+        except Exception:
+            csv_path = None
 
         total = len(results)
         passed = sum(1 for r in results if r["status"] == "PASS")
@@ -173,7 +363,8 @@ def detect_folder(
             f"  失敗: {failed} 張  ❌\n"
             f"  良品率: {passed/total*100:.1f}%\n\n"
             f"📁 **結果儲存位置**\n"
-            f"  {output_dir}\n\n"
+            f"  {output_dir}\n"
+            f"  CSV 報告: {csv_path or '(匯出失敗)'}\n\n"
             f"⚠️ **瑕疵最多的影像**\n"
             f"{worst_info if worst_info else '  無瑕疵'}"
         )
@@ -358,6 +549,168 @@ def create_ui():
                     inputs=[input_dir_box, output_dir_box,
                             conf_batch, iou_batch],
                     outputs=[batch_result]
+                )
+
+            # ══════════════════════════════════════════
+            # Tab: 影片 / 攝影機偵測
+            # ══════════════════════════════════════════
+            with gr.Tab("🎥 影片偵測"):
+                gr.Markdown("### 上傳 PCB 產線影片進行連續瑕疵偵測")
+                with gr.Row():
+                    video_input = gr.Video(label="輸入影片", height=360)
+                    video_output = gr.Video(label="偵測結果", height=360)
+                with gr.Row():
+                    conf_vid = gr.Slider(0.1, 0.9, 0.25, 0.05,
+                                         label="信心度門檻")
+                    iou_vid = gr.Slider(0.1, 0.9, 0.45, 0.05,
+                                        label="IoU 門檻")
+                    skip_vid = gr.Slider(1, 10, 1, 1,
+                                         label="Frame Skip (每 N 幀推論)")
+                video_btn = gr.Button("▶️ 開始偵測", variant="primary",
+                                      size="lg")
+                video_status = gr.Textbox(label="執行狀態", lines=10,
+                                          interactive=False,
+                                          elem_classes="status-box")
+                video_btn.click(
+                    fn=detect_video,
+                    inputs=[video_input, conf_vid, iou_vid, skip_vid],
+                    outputs=[video_output, video_status],
+                )
+
+            # ══════════════════════════════════════════
+            # Tab: 前處理預覽
+            # ══════════════════════════════════════════
+            with gr.Tab("🎨 前處理預覽"):
+                gr.Markdown(
+                    "### 以 OpenCV 檢視去噪 / 對比 / 銳化對影像的影響"
+                )
+                with gr.Row():
+                    pre_in = gr.Image(label="輸入", type="pil", height=360)
+                    pre_out = gr.Image(label="處理後", type="pil",
+                                       height=360)
+                pre_cmp = gr.Image(label="比較圖 (Original | Processed | Edges)",
+                                   type="pil")
+                with gr.Row():
+                    denoise_sel = gr.Dropdown(
+                        ["gaussian", "bilateral", "nlm"],
+                        value="bilateral", label="去噪方法",
+                    )
+                    contrast_sel = gr.Dropdown(
+                        ["clahe", "histogram", "gamma"],
+                        value="clahe", label="對比增強",
+                    )
+                    sharpen_chk = gr.Checkbox(value=True, label="套用銳化")
+                pre_btn = gr.Button("🔧 執行前處理", variant="primary")
+                pre_btn.click(
+                    fn=preview_preprocess,
+                    inputs=[pre_in, denoise_sel, contrast_sel, sharpen_chk],
+                    outputs=[pre_out, pre_cmp],
+                )
+
+            # ══════════════════════════════════════════
+            # Tab: 傳統 CV 分析器
+            # ══════════════════════════════════════════
+            with gr.Tab("🧪 傳統 CV 分析"):
+                gr.Markdown(
+                    "### 以經典影像處理方法輔助偵測 (可與 YOLO 互補)"
+                )
+                with gr.Tabs():
+                    # 黃金樣本比對
+                    with gr.Tab("Ⓐ 黃金樣本比對"):
+                        with gr.Row():
+                            ref_img = gr.Image(label="良品 (Reference)",
+                                               type="pil", height=280)
+                            tgt_img = gr.Image(label="測試影像 (Target)",
+                                               type="pil", height=280)
+                        with gr.Row():
+                            diff_out = gr.Image(label="差異標註",
+                                                type="pil", height=280)
+                            heat_out = gr.Image(label="差異熱圖",
+                                                type="pil", height=280)
+                        with gr.Row():
+                            diff_th = gr.Slider(10, 120, 40, 5,
+                                                label="差異門檻")
+                            diff_min = gr.Slider(5, 500, 30, 5,
+                                                 label="最小面積")
+                        diff_btn = gr.Button("🔍 開始比對",
+                                             variant="primary")
+                        diff_table = gr.Markdown("尚未分析")
+                        diff_btn.click(
+                            fn=analyze_reference_diff,
+                            inputs=[ref_img, tgt_img, diff_th, diff_min],
+                            outputs=[diff_out, heat_out, diff_table],
+                        )
+
+                    # 錫膏分析
+                    with gr.Tab("Ⓑ 錫膏分析 (SPI)"):
+                        with gr.Row():
+                            sp_in = gr.Image(label="錫膏影像",
+                                             type="pil", height=320)
+                            sp_out = gr.Image(label="分析結果",
+                                              type="pil", height=320)
+                        with gr.Row():
+                            sp_v = gr.Slider(50, 250, 150, 5,
+                                             label="亮度門檻 (V_min)")
+                            sp_area = gr.Slider(5, 300, 15, 5,
+                                                label="最小塊面積")
+                        sp_btn = gr.Button("🧪 分析錫膏",
+                                           variant="primary")
+                        sp_stats = gr.Markdown("尚未分析")
+                        sp_btn.click(
+                            fn=analyze_solder,
+                            inputs=[sp_in, sp_v, sp_area],
+                            outputs=[sp_out, sp_stats],
+                        )
+
+                    # Blob 分析
+                    with gr.Tab("Ⓒ 形態學 Blob 偵測"):
+                        with gr.Row():
+                            blob_in = gr.Image(label="輸入",
+                                               type="pil", height=320)
+                            blob_out = gr.Image(label="結果",
+                                                type="pil", height=320)
+                        with gr.Row():
+                            blob_min = gr.Slider(1, 200, 10, 1,
+                                                 label="最小面積")
+                            blob_max = gr.Slider(100, 10000, 5000, 100,
+                                                 label="最大面積")
+                        blob_btn = gr.Button("🔎 Blob 分析",
+                                             variant="primary")
+                        blob_stats = gr.Markdown("尚未分析")
+                        blob_btn.click(
+                            fn=analyze_blob,
+                            inputs=[blob_in, blob_min, blob_max],
+                            outputs=[blob_out, blob_stats],
+                        )
+
+            # ══════════════════════════════════════════
+            # Tab: 模型匯出
+            # ══════════════════════════════════════════
+            with gr.Tab("📦 模型匯出"):
+                gr.Markdown(
+                    "### 將訓練好的模型匯出為部署格式\n"
+                    "- **ONNX** → 跨平台通用格式 (CPU/GPU/邊緣裝置)\n"
+                    "- **TorchScript** → PyTorch 原生部署\n"
+                    "- **OpenVINO** → Intel 裝置加速\n"
+                    "- **TensorRT (engine)** → NVIDIA GPU 極速推論\n"
+                )
+                with gr.Row():
+                    exp_format = gr.Dropdown(
+                        ["onnx", "torchscript", "openvino",
+                         "engine", "coreml"],
+                        value="onnx", label="匯出格式",
+                    )
+                    exp_size = gr.Slider(320, 1280, 640, 32,
+                                         label="影像尺寸")
+                exp_btn = gr.Button("🚀 開始匯出",
+                                    variant="primary", size="lg")
+                exp_status = gr.Textbox(label="匯出狀態", lines=4,
+                                        interactive=False,
+                                        elem_classes="status-box")
+                exp_btn.click(
+                    fn=export_model_ui,
+                    inputs=[exp_format, exp_size],
+                    outputs=[exp_status],
                 )
 
             # ══════════════════════════════════════════

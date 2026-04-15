@@ -4,12 +4,14 @@ PCB 瑕疵偵測 - 推論模組
 """
 
 import cv2
+import csv
 import numpy as np
 import os
 import json
+import time
 import argparse
 from pathlib import Path
-from typing import Union, List, Dict, Optional, Tuple
+from typing import Union, List, Dict, Optional, Tuple, Generator
 from datetime import datetime
 
 import torch
@@ -285,6 +287,135 @@ class PCBDefectDetector:
 
         return all_results
 
+    # ────────────────────────────────────────────────
+    # 影片 / 攝影機串流推論
+    # ────────────────────────────────────────────────
+    def predict_video(
+        self,
+        source: Union[str, int],
+        output_path: Optional[str] = None,
+        show: bool = False,
+        frame_skip: int = 1,
+    ) -> Dict:
+        """對影片檔或攝影機 (0) 進行即時偵測。
+
+        Args:
+            source:      影片檔路徑或 int (webcam index)
+            output_path: 輸出 .mp4 路徑（None 則不存檔）
+            show:        是否以視窗播放（無頭環境應設為 False）
+            frame_skip:  每幾幀推論一次（提升速度）
+
+        Returns:
+            統計字典（總幀數、總瑕疵數、每類別累計、平均 FPS）
+        """
+        cap = cv2.VideoCapture(source)
+        if not cap.isOpened():
+            raise RuntimeError(f"無法開啟影片來源: {source}")
+
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps_in = cap.get(cv2.CAP_PROP_FPS) or 30.0
+
+        writer = None
+        if output_path:
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(output_path, fourcc, fps_in, (w, h))
+
+        total_frames = 0
+        total_defects = 0
+        class_totals: Dict[str, int] = {}
+        last_annotated = None
+        t_start = time.time()
+
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                total_frames += 1
+                if (total_frames - 1) % frame_skip != 0 and last_annotated is not None:
+                    annotated = last_annotated
+                else:
+                    detections, annotated = self.predict_image(frame)
+                    last_annotated = annotated
+                    total_defects += len(detections)
+                    for d in detections:
+                        class_totals[d["class_name"]] = \
+                            class_totals.get(d["class_name"], 0) + 1
+
+                if writer is not None:
+                    writer.write(annotated)
+                if show:
+                    cv2.imshow("PCB Defect - Video", annotated)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        break
+        finally:
+            cap.release()
+            if writer is not None:
+                writer.release()
+            if show:
+                cv2.destroyAllWindows()
+
+        elapsed = max(time.time() - t_start, 1e-6)
+        return {
+            "total_frames": total_frames,
+            "total_defects": total_defects,
+            "class_totals": class_totals,
+            "avg_fps": round(total_frames / elapsed, 2),
+            "output_path": output_path,
+        }
+
+    # ────────────────────────────────────────────────
+    # 報告輸出 (CSV)
+    # ────────────────────────────────────────────────
+    @staticmethod
+    def export_csv_report(results: List[Dict], csv_path: str) -> str:
+        """將 predict_folder 的結果輸出為 CSV 報表 (每列 = 一個瑕疵)"""
+        Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "image", "status", "defect_index", "class_name",
+                "confidence", "x1", "y1", "x2", "y2", "area",
+            ])
+            for r in results:
+                if not r["detections"]:
+                    writer.writerow([r["image"], r["status"], "", "", "",
+                                     "", "", "", "", ""])
+                    continue
+                for i, d in enumerate(r["detections"], 1):
+                    x1, y1, x2, y2 = d["bbox"]
+                    writer.writerow([
+                        r["image"], r["status"], i, d["class_name"],
+                        d["confidence"], x1, y1, x2, y2, d["area"],
+                    ])
+        print(f"CSV 報告已儲存: {csv_path}")
+        return csv_path
+
+    # ────────────────────────────────────────────────
+    # 模型匯出 (ONNX / TorchScript / OpenVINO)
+    # ────────────────────────────────────────────────
+    def export_model(
+        self,
+        format: str = "onnx",
+        image_size: int = 640,
+        half: bool = False,
+        dynamic: bool = True,
+        simplify: bool = True,
+    ) -> str:
+        """匯出為部署格式。支援 onnx / torchscript / openvino / engine (TensorRT) 等。"""
+        print(f"\n匯出模型為 {format.upper()} 格式...")
+        export_path = self.model.export(
+            format=format,
+            imgsz=image_size,
+            half=half,
+            dynamic=dynamic,
+            simplify=simplify,
+        )
+        print(f"匯出完成: {export_path}")
+        return str(export_path)
+
     def evaluate_model(
         self,
         data_yaml: str,
@@ -316,8 +447,8 @@ def main():
     parser = argparse.ArgumentParser(description="PCB 瑕疵偵測 - 推論腳本")
     parser.add_argument("--model", type=str, required=True,
                         help="模型權重路徑 (.pt)")
-    parser.add_argument("--source", type=str, required=True,
-                        help="輸入影像路徑或資料夾")
+    parser.add_argument("--source", type=str, default=None,
+                        help="輸入影像路徑或資料夾 (若用 --video/--export 可省略)")
     parser.add_argument("--output", type=str, default="./results/inference",
                         help="輸出資料夾")
     parser.add_argument("--conf", type=float, default=0.25,
@@ -330,6 +461,16 @@ def main():
                         help="影像尺寸")
     parser.add_argument("--no-save-json", action="store_true",
                         help="不儲存 JSON 報告")
+    parser.add_argument("--save-csv", action="store_true",
+                        help="批次偵測時同時輸出 CSV 報告")
+    parser.add_argument("--video", type=str, default=None,
+                        help="影片檔路徑 (或數字 0 開啟 webcam)")
+    parser.add_argument("--frame-skip", type=int, default=1,
+                        help="影片推論每 N 幀跑一次，提升 FPS")
+    parser.add_argument("--export", type=str, default=None,
+                        choices=["onnx", "torchscript", "openvino",
+                                 "engine", "coreml"],
+                        help="匯出模型部署格式")
 
     args = parser.parse_args()
 
@@ -341,15 +482,44 @@ def main():
         image_size=args.imgsz,
     )
 
+    # ── 模型匯出 ──
+    if args.export:
+        detector.export_model(format=args.export, image_size=args.imgsz)
+        return
+
+    # ── 影片 / 攝影機 ──
+    if args.video is not None:
+        src: Union[str, int] = (
+            int(args.video) if args.video.isdigit() else args.video
+        )
+        out_vid = str(Path(args.output) / "detected_video.mp4")
+        stats = detector.predict_video(
+            source=src,
+            output_path=out_vid,
+            frame_skip=args.frame_skip,
+        )
+        print("\n影片推論統計:")
+        for k, v in stats.items():
+            print(f"  {k}: {v}")
+        return
+
+    if args.source is None:
+        print("錯誤: 請提供 --source (或使用 --video / --export)")
+        return
     source_path = Path(args.source)
 
     if source_path.is_dir():
         # 批次偵測
-        detector.predict_folder(
+        results = detector.predict_folder(
             input_dir=str(source_path),
             output_dir=args.output,
             save_json=not args.no_save_json,
         )
+        if args.save_csv:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            detector.export_csv_report(
+                results, str(Path(args.output) / f"report_{ts}.csv")
+            )
     elif source_path.is_file():
         # 單張偵測
         detections, annotated = detector.predict_image(str(source_path))
